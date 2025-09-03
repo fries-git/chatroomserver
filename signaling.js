@@ -14,9 +14,8 @@ let nextId = 1;
 setInterval(() => {
   const now = Date.now();
   for (const [name, room] of Object.entries(rooms)) {
-    if (now - room.lastBeat > 30000) { // 30s without heartbeat
+    if (now - room.lastBeat > 30000) {
       console.log(`Deleting stale room: ${name}`);
-      // notify waiting clients
       room.clients.forEach(res => res.json([{ system: true, text: "Room closed by host." }]));
       delete rooms[name];
     }
@@ -63,7 +62,6 @@ app.post("/send", (req, res) => {
   const msg = { id: nextId++, user, text, time: Date.now() };
   r.messages.push(msg);
 
-  // notify long-polling clients
   r.clients.forEach(c => c.json([msg]));
   r.clients = [];
 
@@ -82,7 +80,6 @@ app.get("/recv", (req, res) => {
     return res.json(newer);
   }
 
-  // hold connection
   r.clients.push(res);
   setTimeout(() => {
     const i = r.clients.indexOf(res);
@@ -91,5 +88,15 @@ app.get("/recv", (req, res) => {
   }, 25000);
 });
 
-const PORT = 8080;
-app.listen(PORT, () => console.log(`Server running on http://localhost:${PORT}`));
+// list rooms
+app.get("/rooms", (req, res) => {
+  const list = Object.entries(rooms).map(([name, r]) => ({
+    name,
+    hasPassword: !!r.password,
+    host: r.host,
+  }));
+  res.json(list);
+});
+
+const PORT = process.env.PORT || 8080;
+app.listen(PORT, () => console.log(`Server running on port ${PORT}`));

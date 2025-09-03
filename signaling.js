@@ -1,55 +1,47 @@
-// server.js
 const express = require("express");
-const bodyParser = require("body-parser");
 const cors = require("cors");
+const bodyParser = require("body-parser");
 
 const app = express();
 app.use(cors());
 app.use(bodyParser.json());
+app.use(express.static("public"));
 
-let rooms = {}; // { roomName: { password, host, messages, clients, lastBeat } }
-let nextId = 1;
+const PORT = process.env.PORT || 3000;
 
-// cleanup stale rooms
+let rooms = {}; 
+// rooms = { roomName: { password, host, messages: [], clients: {username: {lastPing,res}}, lastActive } }
+
+// Clean up stale rooms every 10s
 setInterval(() => {
   const now = Date.now();
-  for (const [name, room] of Object.entries(rooms)) {
-    if (now - room.lastBeat > 30000) {
-      console.log(`Deleting stale room: ${name}`);
-      room.clients.forEach(res => res.json([{ system: true, text: "Room closed by host." }]));
-      delete rooms[name];
+  for (const [room, r] of Object.entries(rooms)) {
+    if (now - r.lastActive > 30000) { // 30s timeout
+      delete rooms[room];
+      console.log(`Deleted room: ${room}`);
     }
   }
 }, 10000);
 
-// --- Routes ---
+// --- API ---
 
-// create a room
+// create room
 app.post("/create", (req, res) => {
   const { room, password, host } = req.body;
   if (!room || !host) return res.status(400).json({ error: "Missing fields" });
-  if (rooms[room]) return res.status(400).json({ error: "Room already exists" });
-
-  rooms[room] = { password, host, messages: [], clients: [], lastBeat: Date.now() };
+  if (rooms[room]) return res.status(400).json({ error: "Room exists" });
+  rooms[room] = { password, host, messages: [], clients: {}, lastActive: Date.now() };
   res.json({ ok: true });
 });
 
 // join room
 app.post("/join", (req, res) => {
-  const { room, password } = req.body;
+  const { room, password, user } = req.body;
   const r = rooms[room];
   if (!r) return res.status(404).json({ error: "No such room" });
   if (r.password && r.password !== password) return res.status(403).json({ error: "Bad password" });
-  res.json({ ok: true });
-});
-
-// heartbeat (only host should call)
-app.post("/beat", (req, res) => {
-  const { room, host } = req.body;
-  const r = rooms[room];
-  if (r && r.host === host) {
-    r.lastBeat = Date.now();
-  }
+  r.clients[user] = { lastPing: Date.now(), res: null };
+  r.lastActive = Date.now();
   res.json({ ok: true });
 });
 
@@ -59,32 +51,37 @@ app.post("/send", (req, res) => {
   const r = rooms[room];
   if (!r) return res.status(404).json({ error: "No such room" });
 
-  const msg = { id: nextId++, user, text, time: Date.now() };
+  const msg = { id: Date.now(), user, text };
   r.messages.push(msg);
 
-  r.clients.forEach(c => c.json([msg]));
-  r.clients = [];
-
+  for (const client of Object.values(r.clients)) {
+    if (client.res) {
+      client.res.json([msg]);
+      client.res = null;
+    }
+  }
+  r.lastActive = Date.now();
   res.json({ ok: true });
 });
 
-// receive messages
+// receive messages (long polling)
 app.get("/recv", (req, res) => {
-  const { room } = req.query;
-  const since = parseInt(req.query.since || "0", 10);
+  const { room, user, since = 0 } = req.query;
   const r = rooms[room];
-  if (!r) return res.status(404).json([]);
+  if (!r) return res.json([]);
 
-  const newer = r.messages.filter(m => m.id > since);
-  if (newer.length > 0) {
-    return res.json(newer);
-  }
+  r.lastActive = Date.now();
+  if (!r.clients[user]) r.clients[user] = { lastPing: Date.now(), res: null };
 
-  r.clients.push(res);
+  const msgs = r.messages.filter(m => m.id > Number(since));
+  if (msgs.length > 0) return res.json(msgs);
+
+  r.clients[user].res = res;
   setTimeout(() => {
-    const i = r.clients.indexOf(res);
-    if (i >= 0) r.clients.splice(i, 1);
-    res.json([]);
+    if (r.clients[user] && r.clients[user].res) {
+      r.clients[user].res.json([]);
+      r.clients[user].res = null;
+    }
   }, 25000);
 });
 
@@ -93,10 +90,9 @@ app.get("/rooms", (req, res) => {
   const list = Object.entries(rooms).map(([name, r]) => ({
     name,
     hasPassword: !!r.password,
-    host: r.host,
+    host: r.host
   }));
   res.json(list);
 });
 
-const PORT = process.env.PORT || 8080;
 app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
